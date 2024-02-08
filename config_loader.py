@@ -106,7 +106,7 @@ DEFAULT_CONFIG = {
     "WATCHING_PRESENCES": "",
     "PLAYING_PRESENCES": "",
     "STREAMING_PRESENCES": "",
-    "CUSTOM_STATUS_PRESENCES": "Em Manutenção",
+    "CUSTOM_STATUS_PRESENCES": "Em teste Nova VPS",
 
     ###############
     ### Intents ###

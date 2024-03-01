@@ -106,7 +106,7 @@ DEFAULT_CONFIG = {
     "WATCHING_PRESENCES": "",
     "PLAYING_PRESENCES": "",
     "STREAMING_PRESENCES": "",
-    "CUSTOM_STATUS_PRESENCES": "Em teste Nova VPS",
+    "CUSTOM_STATUS_PRESENCES": "Oii! Sou o melhor bot de musica de 2024!!",
 
     ###############
     ### Intents ###

@@ -106,7 +106,7 @@ DEFAULT_CONFIG = {
     "WATCHING_PRESENCES": "",
     "PLAYING_PRESENCES": "",
     "STREAMING_PRESENCES": "",
-    "CUSTOM_STATUS_PRESENCES": "Oii! Sou o melhor bot de musica de 2024!!",
+    "CUSTOM_STATUS_PRESENCES": "Dificuldades tecnicas detectada! Estamos trabalhando para resolver o problema! use /Changenode para mudar o servidor",
 
     ###############
     ### Intents ###

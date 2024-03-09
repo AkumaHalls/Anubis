@@ -106,7 +106,7 @@ DEFAULT_CONFIG = {
     "WATCHING_PRESENCES": "",
     "PLAYING_PRESENCES": "",
     "STREAMING_PRESENCES": "",
-    "CUSTOM_STATUS_PRESENCES": "Dificuldades tecnicas detectada! Estamos trabalhando para resolver o problema! use /Changenode para mudar o servidor",
+    "CUSTOM_STATUS_PRESENCES": "Estamos rodando nosso proprio node Lavalink ate corrigir a falha de redundancia de nossos outros nodes Servidor de música atual: LOCAL v4",
 
     ###############
     ### Intents ###

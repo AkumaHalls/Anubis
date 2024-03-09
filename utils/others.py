@@ -18,6 +18,7 @@ from utils.music.errors import GenericError, ArgumentParsingError
 
 if TYPE_CHECKING:
     from utils.client import BotCore
+    from utils.music.models import LavalinkPlayer
 
 token_regex = re.compile(r'[a-zA-Z0-9_-]{23,28}\.[a-zA-Z0-9_-]{6,7}\.[a-zA-Z0-9_-]{27,}')
 
@@ -51,7 +52,7 @@ class CommandArgparse(argparse.ArgumentParser):
             for arg_name in e.argument_name.split("/"):
                 for c, a in enumerate(args):
                     if a.startswith(arg_name):
-                        args[c] = a.replace("-", "", count=1)
+                        args[c] = a.replace("-", "", 1)
                         return self.parse_known_args(args, namespace)
 
     def error(self, message: str):
@@ -69,7 +70,7 @@ class CustomContext(commands.Context):
         self.store_message = None
         self.application_command = None
 
-    async def defer(self, ephemeral: bool = False):
+    async def defer(self, ephemeral: bool = False, *args, **kwargs):
 
         if ephemeral:
             return
@@ -278,11 +279,12 @@ async def check_cmd(cmd, inter: Union[disnake.Interaction, disnake.ModalInteract
             if not c:
                 raise commands.CheckFailure()
 
-    bucket = cmd._buckets.get_bucket(inter)  # type: ignore
-    if bucket:
-        retry_after = bucket.update_rate_limit()
-        if retry_after:
-            raise commands.CommandOnCooldown(cooldown=bucket, retry_after=retry_after, type=cmd._buckets.type)
+    if cmd._buckets._cooldown:
+        bucket = cmd._buckets.get_bucket(inter)  # type: ignore
+        if bucket:
+            retry_after = bucket.update_rate_limit()
+            if retry_after:
+                raise commands.CommandOnCooldown(cooldown=bucket, retry_after=retry_after, type=cmd._buckets.type)
 
     """try:
         chkcmd = list(cmd.children.values())[0]
@@ -631,10 +633,10 @@ async def select_bot_pool(inter: Union[CustomContext, disnake.MessageInteraction
 
     if not bots:
 
-        if [b for b in inter.bot.pool.bots if b.appinfo and b.appinfo.bot_public]:
+        if (bcount:=len([b for b in inter.bot.pool.bots if b.appinfo and b.appinfo.bot_public])):
             raise GenericError(
                 f"**Será necessário adicionar no servidor pelo menos um bot compatível clicando no botão abaixo:**",
-                components=[disnake.ui.Button(custom_id="bot_invite", label="Adicionar bot(s)")]
+                components=[disnake.ui.Button(custom_id="bot_invite", label=f"Adicionar bot{'s'[:bcount^1]}")]
             )
         else:
             raise GenericError("**Não há bots compatíveis com meus comandos no servidor...**")
@@ -718,7 +720,7 @@ async def select_bot_pool(inter: Union[CustomContext, disnake.MessageInteraction
 def queue_track_index(inter: disnake.AppCmdInter, bot: BotCore, query: str, match_count: int = 1,
                       case_sensitive: bool = False):
 
-    player = bot.music.players[inter.guild_id]
+    player: LavalinkPlayer = bot.music.players[inter.guild_id]
 
     try:
         query, unique_id = query.split(" || ID > ")
@@ -731,7 +733,7 @@ def queue_track_index(inter: disnake.AppCmdInter, bot: BotCore, query: str, matc
 
     count = int(match_count)
 
-    for counter, track in enumerate(player.queue):
+    for counter, track in enumerate(player.queue + player.queue_autoplay):
 
         if unique_id is not None:
 
@@ -784,7 +786,11 @@ def update_inter(old: Union[disnake.Interaction, CustomContext], new: disnake.In
     else:
         old.token = new.token
         old.id = new.id
-        old.response = new.response
+
+        try:
+            old.response = new.response
+        except AttributeError:
+            pass
 
         try:
             old.self_mod = True

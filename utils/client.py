@@ -10,13 +10,11 @@ import os
 import pickle
 import subprocess
 import traceback
-import zlib
 from configparser import ConfigParser
 from importlib import import_module
 from subprocess import check_output
 from typing import Optional, Union, List
 
-import aiofiles
 import aiohttp
 import disnake
 import requests
@@ -31,8 +29,7 @@ from utils.db import MongoDatabase, LocalDatabase, get_prefix, DBModel, global_d
 from utils.music.checks import check_pool_bots
 from utils.music.errors import GenericError
 from utils.music.local_lavalink import run_lavalink
-from utils.music.models import music_mode, LavalinkPlayer, PartialTrack, LavalinkPlaylist, LavalinkTrack, \
-    PartialPlaylist
+from utils.music.models import music_mode, LavalinkPlayer
 from utils.music.spotify import spotify_client
 from utils.others import CustomContext, token_regex, sort_dict_recursively
 from utils.owner_panel import PanelView
@@ -82,23 +79,10 @@ class BotPool:
         self.controller_bot: Optional[BotCore] = None
         self.current_useragent = self.reset_useragent()
         self.processing_gc: bool = False
-        self.lavalink_connect_queue = {}
 
     def reset_useragent(self):
         self.current_useragent = generate_user_agent()
 
-    async def connect_lavalink_queue_task(self, identifier: str):
-
-        delay_secs = int(self.config.get("LAVALINK_QUEUE_DELAY", 1.5))
-
-        try:
-            while True:
-                async with asyncio.timeout(600):
-                    bot, data = await self.lavalink_connect_queue[identifier].get()
-                    await bot.get_cog("Music").connect_node(data)
-                    await asyncio.sleep(delay_secs)
-        except asyncio.TimeoutError:
-            pass
 
     @property
     def database(self) -> Union[LocalDatabase, MongoDatabase]:
@@ -206,78 +190,18 @@ class BotPool:
             [asyncio.create_task(self.start_bot(bot)) for bot in bots]
         )
 
-    async def load_playlist_cache(self):
+    def load_playlist_cache(self):
 
         try:
-            async with aiofiles.open(f"./.playlist_cache.pkl", 'rb') as file:
-                data = pickle.loads(zlib.decompress(await file.read()))
+            with open(f"./playlist_cache.json") as file:
+                self.playlist_cache = json.load(file)
         except FileNotFoundError:
             return
-
-        for url, track_data in data.items():
-            self.playlist_cache[url] = self.process_track_cls(track_data)
-
-    def process_track_cls(self, data: list, playlists: dict = None):
-
-        if not playlists:
-            playlists = {}
-
-        tracks = []
-
-        for info in data:
-
-            if info["sourceName"] == "spotify":
-
-                if playlist := info.pop("playlist", None):
-
-                    try:
-                        playlist = playlists[playlist["url"]]
-                    except KeyError:
-                        playlist_cls = PartialPlaylist(
-                            {
-                                'loadType': 'PLAYLIST_LOADED',
-                                'playlistInfo': {
-                                    'name': playlist["name"],
-                                    'selectedTrack': -1
-                                },
-                                'tracks': []
-                            }, url=playlist["url"]
-                        )
-                        playlists[playlist["url"]] = playlist_cls
-                        playlist = playlist_cls
-
-                t = PartialTrack(info=info, playlist=playlist)
-
-            else:
-
-                if playlist := info.pop("playlist", None):
-
-                    try:
-                        playlist = playlists[playlist["url"]]
-                    except KeyError:
-                        playlist_cls = LavalinkPlaylist(
-                            {
-                                'loadType': 'PLAYLIST_LOADED',
-                                'playlistInfo': {
-                                    'name': playlist["name"],
-                                    'selectedTrack': -1
-                                },
-                                'tracks': []
-                            }, url=playlist["url"]
-                        )
-                        playlists[playlist["url"]] = playlist_cls
-                        playlist = playlist_cls
-
-                t = LavalinkTrack(id_=info.get("id", ""), info=info, playlist=playlist, requester=info["extra"]["requester"])
-
-            tracks.append(t)
-
-        return tracks, playlists
 
     async def connect_rpc_ws(self):
 
         if not self.config["RUN_RPC_SERVER"] and (
-                not self.config["RPC_SERVER"] or self.config["RPC_SERVER"].replace("$PORT", port := os.environ.get("PORT", "80")) == f"ws://localhost:{port}/ws"):
+                not self.config["RPC_SERVER"] or self.config["RPC_SERVER"] == "ws://localhost:80/ws"):
             pass
         else:
             await self.ws_client.ws_loop()
@@ -342,11 +266,10 @@ class BotPool:
         else:
             for key, value in {section: dict(config.items(section)) for section in config.sections()}.items():
                 value["identifier"] = key.replace(" ", "_")
-                value["secure"] = value.get("secure", "").lower() == "true"
+                value["secure"] = value.get("secure") == "true"
                 value["port"] = value["port"].replace("{SERVER_PORT}", os.environ.get("SERVER_PORT") or "8090")
-                value["search"] = value.get("search", "").lower() != "false"
-                value["retry_403"] = value.get("retry_403", "").lower() == "true"
-                value["enqueue_connect"] = value.get("enqueue_connect", "").lower() == "true"
+                value["search"] = value.get("search") != "false"
+                value["retry_403"] = value.get("retry_403") == "true"
                 value["search_providers"] = value.get("search_providers", "").strip().split() or [self.config["DEFAULT_SEARCH_PROVIDER"]] + [s for s in ("ytsearch", "scsearch") if s != self.config["DEFAULT_SEARCH_PROVIDER"]]
                 LAVALINK_SERVERS[key] = value
 
@@ -398,15 +321,6 @@ class BotPool:
 
         self.local_database = LocalDatabase()
 
-        os.environ.update(
-            {
-                "GIT_DIR": self.config["GIT_DIR"],
-                "JISHAKU_HIDE": "true",
-                "JISHAKU_NO_DM_TRACEBACK": "true",
-                "JISHAKU_NO_UNDERSCORE": "true",
-             }
-        )
-
         try:
             self.commit = check_output(['git', 'rev-parse', 'HEAD']).decode('ascii').strip()
             print(f"Commit ver: {self.commit}\n{'-' * 30}")
@@ -420,6 +334,8 @@ class BotPool:
             self.remote_git_url = self.config["SOURCE_REPO"]
 
         prefix = get_prefix if intents.message_content else commands.when_mentioned
+
+        self.load_playlist_cache()
 
         self.ws_client = WSClient(self.config["RPC_SERVER"], pool=self)
 
@@ -486,6 +402,14 @@ class BotPool:
             )
 
             bot.http.token = token
+
+            os.environ.update(
+                {
+                    "JISHAKU_HIDE": "true",
+                    "JISHAKU_NO_DM_TRACEBACK": "true",
+                    "JISHAKU_NO_UNDERSCORE": "true",
+                }
+            )
 
             bot.load_extension("jishaku")
 
@@ -685,12 +609,6 @@ class BotPool:
                 print(message)
 
         loop = asyncio.get_event_loop()
-
-        loop.create_task(self.load_playlist_cache())
-
-        for lserver in LAVALINK_SERVERS.values():
-            self.lavalink_connect_queue[lserver["identifier"]] = asyncio.Queue()
-            loop.create_task(self.connect_lavalink_queue_task(lserver["identifier"]))
 
         if start_local:
             loop.create_task(self.start_lavalink(loop=loop))
@@ -927,52 +845,37 @@ class BotCore(commands.AutoShardedBot):
         except:
             traceback.print_exc()
 
-    def sync_command_cooldowns(self, force=False):
+    def sync_command_cooldowns(self):
 
         for b in self.pool.bots:
 
-            if b == self and force is False:
+            if not b.bot_ready or b == self:
                 continue
 
             for cmd in b.commands:
-                cmd.ignore_extra = False
                 if cmd.extras.get("exclusive_cooldown"): continue
-                c = self.get_command(cmd.name)
-                c.ignore_extra = False
-                if self.pool.config["ENABLE_COMMANDS_COOLDOWN"] is False:
-                    c._buckets._cooldown = None
-                else:
-                    c._buckets = cmd._buckets
+                self.get_command(cmd.name)._buckets = cmd._buckets
 
             for cmd in b.slash_commands:
                 c = self.get_slash_command(cmd.name)
                 if not c: continue
                 c.body.dm_permission = False
-                if self.pool.config["ENABLE_COMMANDS_COOLDOWN"] is False:
-                    c._buckets._cooldown = None
-                else:
-                    if c.extras.get("exclusive_cooldown"): continue
-                    c._buckets = cmd._buckets
+                if c.extras.get("exclusive_cooldown"): continue
+                c._buckets = cmd._buckets
 
             for cmd in b.user_commands:
                 c = self.get_user_command(cmd.name)
                 if not c: continue
                 c.body.dm_permission = False
-                if self.pool.config["ENABLE_COMMANDS_COOLDOWN"] is False:
-                    c._buckets._cooldown = None
-                else:
-                    if c.extras.get("exclusive_cooldown"): continue
-                    c._buckets = cmd._buckets
+                if c.extras.get("exclusive_cooldown"): continue
+                c._buckets = cmd._buckets
 
             for cmd in b.message_commands:
                 c = self.get_message_command(cmd.name)
                 if not c: continue
                 c.body.dm_permission = False
-                if self.pool.config["ENABLE_COMMANDS_COOLDOWN"] is False:
-                    c._buckets._cooldown = None
-                else:
-                    if c.extras.get("exclusive_cooldown"): continue
-                    c._buckets = cmd._buckets
+                if c.extras.get("exclusive_cooldown"): continue
+                c._buckets = cmd._buckets
 
     async def can_send_message(self, message: disnake.Message):
 
@@ -989,7 +892,7 @@ class BotCore(commands.AutoShardedBot):
 
     async def on_message(self, message: disnake.Message):
 
-        if not self.bot_ready or not self.appinfo or self.is_closed():
+        if not self.bot_ready or not self.appinfo:
             return
 
         if not message.guild:
@@ -1100,27 +1003,6 @@ class BotCore(commands.AutoShardedBot):
         except:
             pass
 
-        if not ctx.valid and message.content.startswith(self.user.mention) and message.author.voice:
-
-            query = str(message.content)
-
-            for m in message.mentions:
-                query = query.replace(m.mention, "", 1)
-
-            query = query.strip()
-
-            if query:
-                play_cmd = self.get_slash_command("play")
-                self.dispatch("pool_dispatch", ctx, self.user.id)
-                try:
-                    await play_cmd.callback(
-                        inter=ctx, query=query, self=play_cmd.cog, position=0, options=False, force_play="no",
-                        manual_selection=False, source=None, repeat_amount=0, server=None
-                    )
-                except Exception as e:
-                    self.dispatch("command_error", ctx, e)
-                return
-
         self.dispatch("song_request", ctx, message)
 
         if not ctx.valid:
@@ -1224,7 +1106,7 @@ class BotCore(commands.AutoShardedBot):
 
     async def on_application_command_autocomplete(self, inter: disnake.ApplicationCommandInteraction):
 
-        if not self.bot_ready or self.is_closed():
+        if not self.bot_ready:
             return []
 
         if not inter.guild_id:
@@ -1239,7 +1121,7 @@ class BotCore(commands.AutoShardedBot):
                              "Use em algum servidor que estou presente.")
             return
 
-        if not self.bot_ready or self.is_closed():
+        if not self.bot_ready:
             await inter.send("Ainda estou inicializando...\nPor favor aguarde mais um pouco...", ephemeral=True)
             return
 
@@ -1249,6 +1131,8 @@ class BotCore(commands.AutoShardedBot):
                       f" - [cmd: {inter.data.name}] {datetime.datetime.utcnow().strftime('%d/%m/%Y - %H:%M:%S')} (UTC) - {inter.filled_options}\n" + ("-" * 15))
             except:
                 traceback.print_exc()
+
+
 
         if str(self.user.id) in self.config["INTERACTION_BOTS_CONTROLLER"]:
 
@@ -1266,7 +1150,7 @@ class BotCore(commands.AutoShardedBot):
 
         await super().on_application_command(inter)
 
-    def load_modules(self, module_list: list = None):
+    def load_modules(self):
 
         modules_dir = "modules"
 
@@ -1280,8 +1164,6 @@ class BotCore(commands.AutoShardedBot):
         for item in os.walk(modules_dir):
             files = filter(lambda f: f.endswith('.py'), item[-1])
             for file in files:
-                if module_list and file not in module_list:
-                    continue
                 filename, _ = os.path.splitext(file)
                 module_filename = os.path.join(modules_dir, filename).replace('\\', '.').replace('/', '.')
                 try:

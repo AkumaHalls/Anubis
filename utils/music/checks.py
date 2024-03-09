@@ -8,7 +8,6 @@ from typing import Union, Optional, TYPE_CHECKING
 import disnake
 from disnake.ext import commands
 
-from utils.db import DBModel
 from utils.music.converters import time_format
 from utils.music.errors import NoVoice, NoPlayer, NoSource, NotRequester, NotDJorStaff, \
     GenericError, MissingVoicePerms, DiffVoiceChannel, PoolException
@@ -72,7 +71,8 @@ def check_forum(inter, bot):
         else:
             raise PoolException()
 
-async def check_pool_bots(inter, only_voiced: bool = False, check_player: bool = True, return_first=False):
+async def check_pool_bots(inter, only_voiced: bool = False, check_player: bool = True, return_first=False,
+                          bypass_prefix=False):
 
     try:
         inter.music_bot
@@ -87,7 +87,7 @@ async def check_pool_bots(inter, only_voiced: bool = False, check_player: bool =
     elif isinstance(inter, disnake.ModalInteraction):
         return
 
-    if len(inter.bot.pool.bots) < 2:
+    if len(inter.bot.pool.bots) < 2 and inter.guild:
         try:
             inter.music_bot = inter.bot
             inter.music_guild = inter.guild
@@ -108,7 +108,7 @@ async def check_pool_bots(inter, only_voiced: bool = False, check_player: bool =
 
     mention_prefixed = False
 
-    if isinstance(inter, CustomContext):
+    if isinstance(inter, CustomContext) and not bypass_prefix:
 
         is_forum = check_forum(inter, inter.bot)
 
@@ -264,7 +264,7 @@ async def check_pool_bots(inter, only_voiced: bool = False, check_player: bool =
     if free_bot:
         inter.music_bot, inter.music_guild = free_bot.pop(0)
 
-        if isinstance(inter, CustomContext) and not mention_prefixed and inter.music_bot.user.id != inter.bot.user.id:
+        if isinstance(inter, CustomContext) and not mention_prefixed and not bypass_prefix and inter.music_bot.user.id != inter.bot.user.id:
             try:
                 await inter.music_bot.wait_for(
                     "pool_payload_ready", timeout=10,
@@ -320,7 +320,7 @@ async def check_pool_bots(inter, only_voiced: bool = False, check_player: bool =
 
         if extra_bots_counter:
             msg += f"\n\nVocê terá que adicionar pelo menos um bot compatível clicando no botão abaixo:"
-            components = [disnake.ui.Button(custom_id="bot_invite", label="Adicionar bot(s).")]
+            components = [disnake.ui.Button(custom_id="bot_invite", label=f"Adicionar bot{'s'[:extra_bots_counter^1]}.")]
 
     else:
 
@@ -563,19 +563,35 @@ def user_cooldown(rate: int, per: int):
 async def check_player_perm(inter, bot: BotCore, channel):
 
     try:
-        player: LavalinkPlayer = bot.music.players[inter.guild_id]
+        guild_id = inter.guild_id
+    except AttributeError:
+        guild_id = inter.guild.id
+
+    try:
+        player: LavalinkPlayer = bot.music.players[guild_id]
     except KeyError:
         return True
 
-    if inter.author.id == player.player_creator or inter.author.id in player.dj:
-        return True
+    try:
+        vc = player.guild.me.voice.channel
+    except AttributeError:
+        vc = player.last_channel
 
     if inter.author.guild_permissions.manage_channels:
         return True
 
-    if player.keep_connected:
-        raise GenericError(f"**Erro!** Apenas membros com a permissão de **gerenciar servidor** "
-                           "podem usar este comando/botão com o **modo 24/7 ativo**...")
+    if player.keep_connected and not (await bot.is_owner(inter.author)):
+        raise GenericError("Apenas membros com a permissão de **gerenciar canais** "
+                           "podem usar esse comando/botão com o **modo 24/7 ativo**...")
+
+    if inter.author.id == player.player_creator or inter.author.id in player.dj:
+        return True
+
+    try:
+        if vc.permissions_for(inter.author).move_members:
+            return True
+    except AttributeError:
+        pass
 
     user_roles = [r.id for r in inter.author.roles]
 
@@ -585,18 +601,13 @@ async def check_player_perm(inter, bot: BotCore, channel):
         return True
 
     if player.restrict_mode:
-        raise GenericError(f"**Erro!** Apenas DJ's ou membros com a permissão de **gerenciar servidor** "
+        raise GenericError("Apenas DJ's ou membros com a permissão de **mover membros** "
                            "podem usar este comando/botão com o **modo restrito ativo**...")
-
-    try:
-        vc = player.guild.me.voice.channel
-    except AttributeError:
-        vc = player.last_channel
 
     if not vc and inter.author.voice:
         player.dj.add(inter.author.id)
 
-    elif not [m for m in vc.members if not m.bot and (m.guild_permissions.manage_channels or (m.id in player.dj) or m.id == player.player_creator)]:
+    elif not [m for m in vc.members if not m.bot and (vc.permissions_for(m).move_members or (m.id in player.dj) or m.id == player.player_creator)]:
         player.dj.add(inter.author.id)
         await channel.send(embed=disnake.Embed(
             description=f"{inter.author.mention} foi adicionado à lista de DJ's por não haver um no canal <#{vc.id}>.",

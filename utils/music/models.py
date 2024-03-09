@@ -426,6 +426,7 @@ class LavalinkPlayer(wavelink.Player):
         self.filters: dict = {}
         self.idle_task: Optional[asyncio.Task] = None
         self.members_timeout_task: Optional[asyncio.Task] = None
+        self.reconnect_voice_channel_task: Optional[asyncio.Task] = None
         self.idle_endtime: Optional[datetime.datetime] = None
         self.hint_rate = self.bot.config["HINT_RATE"]
         self.command_log: str = ""
@@ -607,11 +608,79 @@ class LavalinkPlayer(wavelink.Player):
 
             await cog.error_report_queue.put({"embed": embed})
 
+    async def reconnect_voice_channel(self):
+
+        try:
+            vc = self.bot.get_channel(self.last_channel.id)
+        except AttributeError:
+            vc = None
+
+        if not vc:
+
+            msg = "O canal de voz foi excluido..."
+
+            if self.static:
+                self.set_command_log(msg)
+                await self.destroy()
+
+            else:
+                try:
+                    self.bot.loop.create_task(self.text_channel.send(embed=disnake.Embed(
+                    description=msg,
+                    color=self.bot.get_color(self.guild.me)), delete_after=7))
+                except:
+                    traceback.print_exc()
+                await self.destroy()
+                return
+
+        while True:
+
+            try:
+                self.bot.music.players[self.guild_id]
+            except KeyError:
+                return
+
+            if self.guild.me.voice:
+                if isinstance(vc, disnake.StageChannel) \
+                        and self.guild.me not in vc.speakers \
+                        and vc.permissions_for(self.guild.me).mute_members:
+                    try:
+                        await self.guild.me.edit(suppress=False)
+                    except Exception:
+                        traceback.print_exc()
+                return
+
+            if self.is_closing:
+                return
+
+            if not self._new_node_task:
+
+                try:
+                    can_connect(vc, self.guild, bot=self.bot)
+                except Exception as e:
+                    self.set_command_log(f"O player foi finalizado devido ao erro: {e}")
+                    await self.destroy()
+                    return
+
+                try:
+                    await self.connect(vc.id)
+                    self.set_command_log(text="Notei uma tentativa de me desconectar do canal. "
+                                                "Caso queira me desconectar use o comando/botão: **stop**.",
+                                           emoji="⚠️")
+                    self.update = True
+                    await asyncio.sleep(5)
+                    continue
+                except Exception:
+                    traceback.print_exc()
+
+            await asyncio.sleep(30)
 
     async def hook(self, event) -> None:
 
         if self.is_closing:
             return
+
+        await self.bot.wait_until_ready()
 
         if isinstance(event, wavelink.TrackEnd):
 
@@ -638,8 +707,6 @@ class LavalinkPlayer(wavelink.Player):
             except:
                 pass
 
-            await self.bot.wait_until_ready()
-
             await self.track_end()
 
             self.update = False
@@ -651,6 +718,9 @@ class LavalinkPlayer(wavelink.Player):
         if isinstance(event, wavelink.TrackStart):
 
             self.start_time = disnake.utils.utcnow()
+
+            if not self.current.autoplay:
+                self.queue_autoplay.clear()
 
             if self.auto_pause:
                 return
@@ -666,8 +736,6 @@ class LavalinkPlayer(wavelink.Player):
             if not send_message_perm:
                 self.text_channel = None
                 return
-
-            await self.bot.wait_until_ready()
 
             if not self.guild.me.voice:
                 try:
@@ -722,11 +790,10 @@ class LavalinkPlayer(wavelink.Player):
 
             cooldown = 10
 
-            await self.bot.wait_until_ready()
-
             if (event.error == "This IP address has been blocked by YouTube (429)" or
                 event.message == "Video returned by YouTube isn't what was requested" or
-                (error_403 := event.cause.startswith("java.lang.RuntimeException: Not success status code: 403"))
+                (error_403 := event.cause.startswith(("java.lang.RuntimeException: Not success status code: 403",
+                                                      "java.io.IOException: Invalid status code for video page response: 400")))
             ):
 
                 if error_403 and self.node.retry_403:
@@ -811,6 +878,7 @@ class LavalinkPlayer(wavelink.Player):
             if event.cause.startswith((
                     "java.lang.IllegalStateException: Failed to get media URL: 2000: An error occurred while decoding track token",
                     "java.net.SocketTimeoutException: Read timed out",
+                    "java.lang.RuntimeException: Not success status code: 204",
                     "java.net.SocketTimeoutException: Connect timed out",
                     "java.lang.IllegalArgumentException: Invalid bitrate",
                     "java.net.UnknownHostException:",
@@ -928,9 +996,15 @@ class LavalinkPlayer(wavelink.Player):
                 await self.connect(vc_id)
                 return
 
-        if isinstance(event, wavelink.TrackStuck):
+            if event.code == 4014:
+                await asyncio.sleep(1)
+                if self.guild and self.guild.me.voice:
+                    return
+                self.set_command_log(f"O player foi desligado por perca de conexão com o canal {self.last_channel.mention}...")
+                await self.destroy(force=True)
+                return
 
-            await self.bot.wait_until_ready()
+        if isinstance(event, wavelink.TrackStuck):
 
             try:
                 self.message_updater_task.cancel()
@@ -948,9 +1022,6 @@ class LavalinkPlayer(wavelink.Player):
 
             await self.process_next()
 
-            return
-
-        elif isinstance(event, wavelink.WebsocketClosed):
             return
 
         print(f"Unknown Wavelink event: {repr(event)}")
@@ -1050,7 +1121,7 @@ class LavalinkPlayer(wavelink.Player):
             if bots_in_guild:
                 hints.append(
                     "Caso algum membro queira me usar em outro canal de voz sem precisar aguardar me "
-                    f"desconectarem ou me interromperem do canal atual, há mais {bots_in_guild} bot(s) no servidor que "
+                    f"desconectarem ou me interromperem do canal atual, há mais {bots_in_guild} bot{'s'[:bots_in_guild^1]} no servidor que "
                     "funciona(m) com o meu mesmo sistema/comandos (usando o mesmo prefixo/comandos de barra). "
                     f"Experimente entrar em um canal de voz diferente do meu atual e use o comando "
                     f"{self.prefix_info}play ou /play."
@@ -1059,7 +1130,7 @@ class LavalinkPlayer(wavelink.Player):
             elif bots_outside_guild:
                 hints.append(
                     "Caso algum membro queira me usar em outro canal de voz sem precisar aguardar me "
-                    f"desconectarem ou me interromperem do canal atual. Dá para adicionar mais {bots_outside_guild} bot(s) "
+                    f"desconectarem ou me interromperem do canal atual. Dá para adicionar mais {bots_outside_guild} bot{'s'[:bots_outside_guild^1]} "
                     f"extras no servidor atual que funciona(m) com o meu mesmo sistema/comandos (usando o mesmo "
                     f"prefixo/comandos de barra). Use o comando {self.prefix_info}invite ou /invite para adicioná-los."
                 )
@@ -1166,7 +1237,7 @@ class LavalinkPlayer(wavelink.Player):
             if self.is_closing:
                 return
 
-            msg = f"**O player foi desligado por falta de membros no canal" + (f"<#{self.guild.me.voice.channel.id}>"
+            msg = "**O player foi desligado por falta de membros no canal" + (f" <#{self.guild.me.voice.channel.id}>"
                                                                                if self.guild.me.voice else '') + "...**"
             self.command_log = msg
             if not self.static and not self.has_thread:
@@ -1323,7 +1394,7 @@ class LavalinkPlayer(wavelink.Player):
 
                 try:
                     embed = disnake.Embed(
-                        description=f"**Falha ao obter dados do autoplay:\n"
+                        description=f"**Falha ao obter dados do autoplay:**\n"
                                     f"{error_msg}",
                         color=disnake.Colour.red())
                     await self.text_channel.send(embed=embed, delete_after=10)
@@ -1409,10 +1480,10 @@ class LavalinkPlayer(wavelink.Player):
         except:
             pass
 
-        if len(self.queue):
+        try:
             track = self.queue.popleft()
 
-        else:
+        except:
 
             try:
 
@@ -1650,12 +1721,12 @@ class LavalinkPlayer(wavelink.Player):
             )
 
         embed = disnake.Embed(
-            description=f"**Não há músicas na fila... Adicione uma música ou use uma das opções abaixo.",
+            description="**Não há músicas na fila... Adicione uma música ou use uma das opções abaixo.**",
             color=self.bot.get_color(self.guild.me)
         )
 
         if not self.keep_connected:
-            embed.description += "\n\nNota:** `O Player será desligado automaticamente` " \
+            embed.description += "\n\n**Nota:** `O Player será desligado automaticamente` " \
                         f"<t:{int((disnake.utils.utcnow() + datetime.timedelta(seconds=self.bot.config['IDLE_TIMEOUT'])).timestamp())}:R> " \
                         f"`caso nenhuma ação seja executada...`"
 
@@ -1880,13 +1951,13 @@ class LavalinkPlayer(wavelink.Player):
         try:
             if self.static:
                 if self.skin_static.startswith("> custom_skin: "):
-                    data = skin_converter(self.custom_skin_static_data[self.skin_static[15:]], player=self)
+                    data = skin_converter(self.custom_skin_static_data[self.skin_static[15:]], player=self, guild=self.guild)
                 else:
                     data = self.bot.player_static_skins[self.skin_static].load(self)
 
             else:
                 if self.skin.startswith("> custom_skin: "):
-                    data = skin_converter(self.custom_skin_data[self.skin[15:]], player=self)
+                    data = skin_converter(self.custom_skin_data[self.skin[15:]], player=self, guild=self.guild)
                 else:
                     data = self.bot.player_skins[self.skin].load(self)
         except OverflowError:
@@ -1963,7 +2034,7 @@ class LavalinkPlayer(wavelink.Player):
                         emoji="⏭️", custom_id=PlayerControls.skip),
                     disnake.ui.Button(
                         emoji="<:music_queue:703761160679194734>", custom_id=PlayerControls.queue,
-                        disabled=not self.queue),
+                        disabled=not (self.queue or self.queue_autoplay)),
                     disnake.ui.Select(
                         placeholder="Mais opções:",
                         custom_id="musicplayer_dropdown_inter",
@@ -2236,6 +2307,11 @@ class LavalinkPlayer(wavelink.Player):
         self.played.clear()
 
         try:
+            self.reconnect_voice_channel_task.cancel()
+        except:
+            pass
+
+        try:
             self.members_timeout_task.cancel()
         except:
             pass
@@ -2381,6 +2457,13 @@ class LavalinkPlayer(wavelink.Player):
                 try:
                     await asyncio.sleep((self.current.duration - self.position) / 1000)
                 except AttributeError:
+                    return
+
+                if not self.last_channel:
+                    await asyncio.sleep(2)
+                    continue
+
+                if [m for m in self.last_channel.members if not m.bot and not (m.voice.deaf or m.voice.self_deaf)]:
                     return
 
                 self.set_command_log()
@@ -2627,6 +2710,7 @@ class LavalinkPlayer(wavelink.Player):
                 "bot_id": self.bot.user.id,
                 "bot_name": str(self.bot.user),
                 "thumb": thumb,
+                "guild": self.guild.name,
                 "auth_enabled": self.bot.config["ENABLE_RPC_AUTH"],
                 "listen_along_invite": self.listen_along_invite
             }

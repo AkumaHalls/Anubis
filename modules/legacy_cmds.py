@@ -14,14 +14,19 @@ import dotenv
 import humanize
 from aiohttp import ClientSession
 from disnake.ext import commands
+from disnake.http import Route
 
 import wavelink
 from config_loader import DEFAULT_CONFIG, load_config
 from utils.client import BotCore
 from utils.db import DBModel
 from utils.music.checks import check_voice, check_requester_channel, can_connect
-from utils.music.errors import GenericError
-from utils.others import sync_message, CustomContext, string_to_file, token_regex, CommandArgparse, get_inter_guild_data
+from utils.music.converters import URL_REG
+from utils.music.errors import GenericError, NoVoice
+from utils.music.interactions import SelectBotVoice
+from utils.music.models import LavalinkPlayer
+from utils.others import sync_message, CustomContext, string_to_file, token_regex, CommandArgparse, \
+    select_bot_pool
 from utils.owner_panel import panel_command, PanelView
 
 
@@ -44,11 +49,12 @@ async def run_command(cmd: str):
         cmd, stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
+        env=os.environ
     )
     stdout, stderr = await p.communicate()
     r = ShellResult(p.returncode, stdout, stderr)
     if r.status != 0:
-        raise GenericError(f"{r.stderr or r.stdout}\n\nStatus Code: {r.status}")
+        raise Exception(f"{r.stderr or r.stdout}\n\nStatus Code: {r.status}")
     return str(r.stdout)
 
 
@@ -88,7 +94,7 @@ class Owner(commands.Cog):
             "git init",
             f'git remote add origin {self.bot.config["SOURCE_REPO"]}',
             'git fetch origin',
-            'git checkout -b main -f --track origin/main'
+            'git --work-tree=. checkout -b main -f --track origin/main'
         ]
         self.owner_view: Optional[PanelView] = None
         self.extra_hints = bot.config["EXTRA_HINTS"].split("||")
@@ -118,8 +124,6 @@ class Owner(commands.Cog):
         )
 
     updatelavalink_flags = CommandArgparse()
-    updatelavalink_flags.add_argument('-force', '--force', action='store_true',
-                                      help="Ignorar a execução/uso do servidor LOCAL.")
     updatelavalink_flags.add_argument('-yml', '--yml', action='store_true',
                                       help="Fazer download do arquivo application.yml.")
     updatelavalink_flags.add_argument("-resetids", "-reset", "--resetids", "--reset",
@@ -127,43 +131,53 @@ class Owner(commands.Cog):
                                            "mudanças do lavaplayer/lavalink).", action="store_true")
 
     @commands.is_owner()
-    @commands.max_concurrency(1, commands.BucketType.user)
-    @commands.command(hidden=True, aliases=["ull", "updatell", "llupdate", "llu"], extras={"flags": updatelavalink_flags})
-    async def updatelavalink(self, ctx: CustomContext, flags: str = ""):
+    @commands.max_concurrency(1, commands.BucketType.default)
+    @commands.command(hidden=True, aliases=["restartll", "rtll", "rll"])
+    async def restartlavalink(self, ctx: CustomContext):
 
-        args, unknown = ctx.command.extras['flags'].parse_known_args(flags.split())
-
-        node: Optional[wavelink.Node] = None
-
-        for bot in self.bot.pool.bots:
-            try:
-                node = bot.music.nodes["LOCAL"]
-                break
-            except KeyError:
-                continue
-
-        if not node and not args.force:
+        if not self.bot.pool.lavalink_instance:
             raise GenericError("**O servidor LOCAL não está sendo usado!**")
-
-        download_urls = [self.bot.config["LAVALINK_FILE_URL"]]
-
-        if args.yml:
-            download_urls.append("https://github.com/zRitsu/LL-binaries/releases/download/0.0.1/application.yml")
-
-        async with ctx.typing():
-
-            for url in download_urls:
-                async with ClientSession() as session:
-                    async with session.get(url) as r:
-                        lavalink_jar = await r.read()
-                        with open(url.split("/")[-1], "wb") as f:
-                            f.write(lavalink_jar)
 
         await self.bot.pool.start_lavalink()
 
         await ctx.send(
             embed=disnake.Embed(
-                description="**O arquivo Lavalink.jar foi atualizado com sucesso!**",
+                description="**Reiniciando o servidor lavalink LOCAL.**",
+                color=self.bot.get_color(ctx.guild.me)
+            )
+        )
+
+    @commands.is_owner()
+    @commands.max_concurrency(1, commands.BucketType.default)
+    @commands.command(hidden=True, aliases=["ull", "updatell", "llupdate", "llu"], extras={"flags": updatelavalink_flags})
+    async def updatelavalink(self, ctx: CustomContext, flags: str = ""):
+
+        if not self.bot.pool.lavalink_instance:
+            raise GenericError("**O servidor LOCAL não está sendo usado!**")
+
+        args, unknown = ctx.command.extras['flags'].parse_known_args(flags.split())
+
+        try:
+            self.bot.pool.lavalink_instance.kill()
+        except:
+            pass
+
+        async with ctx.typing():
+
+            await asyncio.sleep(1.5)
+
+            if os.path.isfile("./Lavalink.jar"):
+                os.remove("./Lavalink.jar")
+
+            if args.yml and os.path.isfile("./application.yml"):
+                os.remove("./application.yml")
+
+            await self.bot.pool.start_lavalink()
+
+        await ctx.send(
+            embed=disnake.Embed(
+                description="**O arquivo Lavalink.jar será atualizado "
+                            "e o servidor lavalink LOCAL será reiniciado.**",
                 color=self.bot.get_color(ctx.guild.me)
             )
         )
@@ -175,7 +189,7 @@ class Owner(commands.Cog):
 
         self.bot.pool.load_cfg()
 
-        txt = "Config do bot foi recarregado com sucesso!"
+        txt = "**AS Configurações do bot foram recarregadas com sucesso!**"
 
         if isinstance(ctx, CustomContext):
             embed = disnake.Embed(colour=self.bot.get_color(ctx.me), description=txt)
@@ -186,7 +200,7 @@ class Owner(commands.Cog):
     @commands.is_owner()
     @panel_command(aliases=["rd", "recarregar"], description="Recarregar os módulos.", emoji="🔄",
                    alt_name="Carregar/Recarregar módulos.")
-    async def reload(self, ctx: Union[CustomContext, disnake.MessageInteraction]):
+    async def reload(self, ctx: Union[CustomContext, disnake.MessageInteraction], *modules):
 
         for m in list(sys.modules):
             if not m.startswith("utils.music.skins."):
@@ -196,19 +210,21 @@ class Owner(commands.Cog):
             except:
                 continue
 
-        data = self.bot.load_modules()
+        modules = [f"{m}.py" for m in modules]
+
+        data = self.bot.load_modules(modules)
         self.bot.load_skins()
 
         await self.bot.sync_app_commands(force=self.bot == self.bot.pool.controller_bot)
 
-        for bot in self.bot.pool.bots:
+        for bot in set(self.bot.pool.bots + [self.bot.pool.controller_bot]):
 
             if bot.user.id != self.bot.user.id:
                 bot.load_skins()
-                bot.load_modules()
+                bot.load_modules(modules)
                 await bot.sync_app_commands(force=bot == self.bot.pool.controller_bot)
 
-        self.bot.sync_command_cooldowns()
+        self.bot.sync_command_cooldowns(force=True)
 
         txt = ""
 
@@ -267,68 +283,44 @@ class Owner(commands.Cog):
         except:
             pass
 
-        update_git = True
-        rename_git_bak = False
+        if args.force or not os.path.exists(os.environ["GIT_DIR"]):
+            out_git += await self.cleanup_git(force=args.force)
 
-        if args.force or not os.path.exists("./.git"):
+        try:
+            await run_command("git --work-tree=. reset --hard")
+        except:
+            pass
 
-            if rename_git_bak:=os.path.exists("./.gitbak") and os.environ.get("HOSTNAME") == "squarecloud.app":
-                pass
-            else:
-                update_git = False
-                out_git += await self.cleanup_git(force=args.force)
+        try:
+            pull_log = await run_command("git --work-tree=. pull --allow-unrelated-histories -X theirs")
+            if "Already up to date" in pull_log:
+                raise GenericError("**Já estou com os ultimos updates instalados...**")
+            out_git += pull_log
 
-        if update_git:
+        except GenericError as e:
+            raise e
 
-            if rename_git_bak or os.environ.get("HOSTNAME") == "squarecloud.app" and os.path.isdir("./.gitbak"):
-                try:
-                    shutil.rmtree("./.git")
-                except:
-                    pass
-                os.rename("./.gitbak", "./.git")
+        except Exception as e:
 
-            try:
-                await run_command("git reset --hard")
-            except:
-                pass
+            if "Already up to date" in str(e):
+                raise GenericError("Já estou com os ultimos updates instalados...")
 
-            try:
-                pull_log = await run_command("git pull --allow-unrelated-histories -X theirs")
-                if "Already up to date" in pull_log:
-                    raise GenericError("**Já estou com os ultimos updates instalados...**")
-                out_git += pull_log
+            elif not "Fast-forward" in str(e):
+                out_git += await self.cleanup_git(force=True)
 
-            except GenericError as e:
-                raise e
+            elif "Need to specify how to reconcile divergent branches" in str(e):
+                out_git += await run_command("git --work-tree=. rebase --no-ff")
 
-            except Exception as e:
+        commit = ""
 
-                if "Already up to date" in str(e):
-                    raise GenericError("Já estou com os ultimos updates instalados...")
+        for l in out_git.split("\n"):
+            if l.startswith("Updating"):
+                commit = l.replace("Updating ", "").replace("..", "...")
+                break
 
-                elif not "Fast-forward" in str(e):
-                    out_git += await self.cleanup_git(force=True)
+        data = (await run_command(f"git --work-tree=. log {commit} {self.git_format}")).split("\n")
 
-                elif "Need to specify how to reconcile divergent branches" in str(e):
-                    out_git += await run_command("git rebase --no-ff")
-
-            commit = ""
-
-            for l in out_git.split("\n"):
-                if l.startswith("Updating"):
-                    commit = l.replace("Updating ", "").replace("..", "...")
-                    break
-
-            data = (await run_command(f"git log {commit} {self.git_format}")).split("\n")
-
-            git_log += format_git_log(data)
-
-        if os.environ.get("HOSTNAME") == "squarecloud.app":
-            try:
-                shutil.rmtree("./.gitbak")
-            except:
-                pass
-            shutil.copytree("./.git", "./.gitbak")
+        git_log += format_git_log(data)
 
         text = "`Será necessário me reiniciar após as alterações.`"
 
@@ -458,7 +450,7 @@ class Owner(commands.Cog):
 
         if force:
             try:
-                shutil.rmtree("./.git")
+                shutil.rmtree(os.environ["GIT_DIR"])
             except FileNotFoundError:
                 pass
 
@@ -481,7 +473,7 @@ class Owner(commands.Cog):
                    alt_name="Ultimas atualizações", hidden=False)
     async def updatelog(self, ctx: Union[CustomContext, disnake.MessageInteraction], amount: int = 10):
 
-        if not os.path.isdir("./.git"):
+        if not os.path.isdir(os.environ["GIT_DIR"]):
             raise GenericError("Não há repositorio iniciado no diretório do bot...\nNota: Use o comando update.")
 
         if not self.bot.pool.remote_git_url:
@@ -715,7 +707,7 @@ class Owner(commands.Cog):
                    alt_name="Exportar source/código-fonte.")
     async def exportsource(self, ctx:Union[CustomContext, disnake.MessageInteraction], *, flags: str = ""):
 
-        if not os.path.isdir("./.git"):
+        if not os.path.isdir(os.environ['GIT_DIR']):
             await self.cleanup_git(force=True)
 
         try:
@@ -867,7 +859,7 @@ class Owner(commands.Cog):
                     counter += 1
 
         if not counter:
-            raise GenericError(f"**Nenhuma mensagem foi deletada de {amount} verificada(s)...**")
+            raise GenericError(f"**Nenhuma mensagem foi deletada de {amount} verificada{'s'[:amount^1]}...**")
 
         if counter == 1:
             txt = "**Uma mensagem foi deletada do seu DM.**"
@@ -952,33 +944,152 @@ class Owner(commands.Cog):
         except KeyError:
             pass
 
-        can_connect(channel=ctx.author.voice.channel, guild=ctx.guild)
+        bot = ctx.bot
+        guild = ctx.guild
+        channel = ctx.channel
+        msg = None
 
-        node: wavelink.Node = self.bot.music.get_best_node()
+        if bot.user.id not in ctx.author.voice.channel.voice_states:
+
+            free_bots = []
+
+            for b in self.bot.pool.bots:
+
+                if not b.bot_ready:
+                    continue
+
+                g = b.get_guild(ctx.guild_id)
+
+                if not g:
+                    continue
+
+                p = b.music.players.get(ctx.guild_id)
+
+                if p and ctx.author.id not in p.last_channel.voice_states:
+                    continue
+
+                free_bots.append(b)
+
+            if len(free_bots) > 1:
+
+                v = SelectBotVoice(ctx, guild, free_bots)
+
+                msg = await ctx.send(
+                    embed=disnake.Embed(
+                        description=f"**Escolha qual bot você deseja usar no canal {ctx.author.voice.channel.mention}**",
+                        color=self.bot.get_color(guild.me)), view=v
+                )
+
+                ctx.store_message = msg
+
+                await v.wait()
+
+                if v.status is None:
+                    await msg.edit(embed=disnake.Embed(description="### Tempo esgotado...", color=self.bot.get_color(guild.me)), view=None)
+                    return
+
+                if v.status is False:
+                    await msg.edit(embed=disnake.Embed(description="### Operação cancelada.",
+                                                   color=self.bot.get_color(guild.me)), view=None)
+                    return
+
+                if not v.inter.author.voice:
+                    await msg.edit(embed=disnake.Embed(description="### Você não está conectado em um canal de voz...",
+                                                   color=self.bot.get_color(guild.me)), view=None)
+                    return
+
+                if not v.inter.author.voice:
+                    raise NoVoice()
+
+                bot = v.bot
+                ctx = v.inter
+                guild = v.guild
+                channel = bot.get_channel(ctx.channel.id)
+
+        can_connect(channel=ctx.author.voice.channel, guild=guild)
+
+        node: wavelink.Node = bot.music.get_best_node()
 
         if not node:
             raise GenericError("**Não há servidores de música disponível!**")
 
-        player = await ctx.bot.get_cog("Music").create_player(
-            inter=ctx, bot=ctx.bot, guild=ctx.guild, channel=ctx.channel
+        player: LavalinkPlayer = await bot.get_cog("Music").create_player(
+            inter=ctx, bot=bot, guild=guild, channel=channel
         )
 
         await player.connect(ctx.author.voice.channel.id)
 
-        self.bot.loop.create_task(ctx.message.add_reaction("👍"))
+        if msg:
+            await msg.edit(
+                f"Sessão de música iniciada no canal {ctx.author.voice.channel.mention}\nVia: {bot.user.mention}{player.controller_link}",
+                components=None, embed=None
+            )
+        else:
+            self.bot.loop.create_task(ctx.message.add_reaction("👍"))
 
         while not ctx.guild.me.voice:
             await asyncio.sleep(1)
 
         if isinstance(ctx.author.voice.channel, disnake.StageChannel):
 
-            stage_perms = ctx.author.voice.channel.permissions_for(ctx.guild.me)
+            stage_perms = ctx.author.voice.channel.permissions_for(guild.me)
             if stage_perms.manage_permissions:
-                await ctx.guild.me.edit(suppress=False)
+                await guild.me.edit(suppress=False)
 
             await asyncio.sleep(1.5)
 
         await player.process_next()
+
+    @commands.is_owner()
+    @commands.command(hidden=True, aliases=["setbotavatar"], description="Alterar o avatar do bot usando anexo ou link direto de uma imagem jpg ou gif.")
+    async def setavatar(self, ctx: CustomContext, url: str = ""):
+
+        use_hyperlink = False
+
+        if re.match(r'^<.*>$', url):
+            use_hyperlink = True
+            url = url.strip("<>")
+
+        if not url:
+
+            if not ctx.message.attachments:
+                raise GenericError("Você deve informar o link de uma imagem ou gif (ou anexar uma) no comando.")
+
+            url = ctx.message.attachments[0].url
+
+            if not url.split("?ex=")[0].endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")):
+                raise GenericError("Você deve anexar um arquivo válido: png, jpg, jpeg, webp, gif, bmp.")
+
+        elif not URL_REG.match(url):
+            raise GenericError("Você informou um link inválido.")
+
+        inter, bot = await select_bot_pool(ctx, return_new=True)
+
+        if not bot:
+            return
+
+        await inter.response.defer(ephemeral=True)
+
+        async with ctx.bot.session.get(url) as r:
+            image_bytes = await r.read()
+
+        await bot.user.edit(avatar=image_bytes)
+
+        await bot.http.request(Route('PATCH', '/applications/@me'), json={
+            "icon": disnake.utils._bytes_to_base64_data(image_bytes)
+        })
+
+        try:
+            func = inter.edit_original_message
+        except AttributeError:
+            try:
+                func = inter.response.edit_message
+            except AttributeError:
+                func = inter.send
+
+        avatar_txt = "avatar" if not use_hyperlink else f"[avatar]({bot.user.display_avatar.with_static_format('png').url})"
+
+        await func(f"O {avatar_txt} do bot {bot.user.mention} foi alterado com sucesso.", view=None, embed=None)
 
     async def cog_check(self, ctx: CustomContext) -> bool:
         return await check_requester_channel(ctx)
@@ -992,7 +1103,6 @@ class Owner(commands.Cog):
                 ini_file = await r.read()
                 with open("lavalink.ini", "wb") as f:
                     f.write(ini_file)
-
 
 def setup(bot: BotCore):
     bot.add_cog(Owner(bot))

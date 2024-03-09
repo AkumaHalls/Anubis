@@ -124,7 +124,6 @@ class Misc(commands.Cog):
             .replace("{uptime}", time_format((disnake.utils.utcnow() - self.bot.uptime).total_seconds() * 1000,
                                              use_names=True))
 
-
     async def presences(self):
 
         try:
@@ -163,6 +162,8 @@ class Misc(commands.Cog):
             activities = cycle(activities)
 
             ignore_sleep = False
+
+            await asyncio.sleep(120)
 
             while True:
 
@@ -623,16 +624,18 @@ class Misc(commands.Cog):
             node_txt_final += "\n"
         node_txt_final += "\n".join(nodes_unavailable)
 
-        embed.description += "### Estatíticas (bot atual):\n" \
-                            f"> 🏙️ **⠂Servidores:** `{len(bot.guilds)}`\n" \
-                            f"> 👥 **⠂Usuários:** `{user_count:,}`\n"
+        if len(bot.pool.bots) < 2:
 
-        if bot_count:
-            embed.description += f"> 🤖 **⠂Bots:** `{bot_count:,}`\n"
+            embed.description += "### Estatíticas (bot atual):\n" \
+                                 f"> 🏙️ **⠂Servidores:** `{len(bot.guilds)}`\n" \
+                                 f"> 👥 **⠂Usuários:** `{user_count:,}`\n"
 
-        if len(bot.pool.bots) > 1:
+            if bot_count:
+                embed.description += f"> 🤖 **⠂Bots:** `{bot_count:,}`\n"
 
-            embed.description += "### Estatísticas totais em todos os bots:\n"
+        else:
+
+            embed.description += "### Estatísticas (totais em todos os bots):\n"
 
             if public_bot_count:
                 embed.description += f"> 🤖 **⠂Bot(s) adicionais público(s):** `{public_bot_count:,}`\n"
@@ -693,7 +696,7 @@ class Misc(commands.Cog):
             if user_data["custom_prefix"]:
                 embed.description += f"> ⌨️ **⠂Seu prefixo de usuário:** `{disnake.utils.escape_markdown(user_data['custom_prefix'], as_needed=True)}`\n"
 
-        links = "[`[Source]`](PRIVADA)"
+        links = "[`[Source]`](https://github.com/zRitsu/MuseHeart-MusicBot)"
 
         if bot.config["SUPPORT_SERVER"]:
             links = f"[`[Suporte]`]({bot.config['SUPPORT_SERVER']})  **|** {links}"
@@ -761,9 +764,9 @@ class Misc(commands.Cog):
             invite = f"[`{disnake.utils.escape_markdown(str(bot.user.name))}`]({disnake.utils.oauth_url(bot.user.id, permissions=disnake.Permissions(bot.config['INVITE_PERMISSIONS']), scopes=('bot', 'applications.commands'), **kwargs)})"
 
             if bot.appinfo.flags.gateway_message_content_limited:
-                invite += f" ({len(bot.guilds)}/100)"
+                invite += f" `[{len(bot.guilds)}/100]`"
             else:
-                invite += f" ({len(bot.guilds)})"
+                invite += f" `[{len(bot.guilds)}]`"
 
             if guild and inter.author.guild_permissions.manage_guild and bot.user in guild.members:
                 bots_in_guild.append(invite)
@@ -773,13 +776,13 @@ class Misc(commands.Cog):
         txt = ""
 
         if bots_invites:
-            txt += "**Bots de música disponíveis:**\n"
+            txt += "## Bots de música disponíveis:\n"
             for i in disnake.utils.as_chunks(bots_invites, 2):
                 txt += " | ".join(i) + "\n"
             txt += "\n"
 
         if bots_in_guild:
-            txt += "**Bots de música que já estão no servidor atual:**\n"
+            txt += "## Bots de música que já estão no servidor atual:\n"
             for i in disnake.utils.as_chunks(bots_in_guild, 2):
                 txt += " | ".join(i) + "\n"
 
@@ -789,7 +792,7 @@ class Misc(commands.Cog):
                     colour=self.bot.get_color(
                         inter.guild.me if inter.guild else guild.me if guild else None
                     ),
-                    title="**Não há bots públicos disponível...**",
+                    title="## Não há bots públicos disponível...",
                 ), ephemeral=True
             )
             return
@@ -798,7 +801,7 @@ class Misc(commands.Cog):
 
         if (len(bots_in_guild) + len(bots_invites)) > 1 and f"client_id={controller_bot.user.id}" not in txt:
             invite = f"[`{disnake.utils.escape_markdown(str(controller_bot.user.name))}`]({disnake.utils.oauth_url(controller_bot.user.id, scopes=['applications.commands'])})"
-            txt = f"**Registrar os comandos de barra no servidor:**\n{invite}\n\n" + txt
+            txt = f"## Registrar os comandos de barra no servidor:\n{invite}\n\n" + txt
 
         color = self.bot.get_color(inter.guild.me if inter.guild else guild.me if guild else None)
 
@@ -947,7 +950,7 @@ class GuildLog(commands.Cog):
         if str(self.bot.user.id) in self.bot.config["INTERACTION_BOTS_CONTROLLER"]:
             return
 
-        print(f"Novo servidor: {guild.name} - [{guild.id}]")
+        print(f"{self.bot.user.name} - Adicionado(a) no servidor: {guild.name} - [{guild.id}]")
 
         try:
             guild_data = await self.bot.get_data(guild.id, db_name=DBModel.guilds)

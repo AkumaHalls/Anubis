@@ -106,7 +106,7 @@ DEFAULT_CONFIG = {
     "WATCHING_PRESENCES": "",
     "PLAYING_PRESENCES": "",
     "STREAMING_PRESENCES": "",
-    "CUSTOM_STATUS_PRESENCES": "Descanse em paz Mr.Kitty! Thor esta esperando voce para brincar! ",
+    "CUSTOM_STATUS_PRESENCES": "Oii Sou Anubis um bot de musica ",
 
     ###############
     ### Intents ###
